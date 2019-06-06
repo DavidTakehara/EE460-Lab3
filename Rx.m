@@ -94,7 +94,8 @@ function [decoded_msg y] = Rx(r,rolloff,desired_user)
     else
     end
     
-    %%  Clock Recovery & Downsampling (fix delt and mu values, es broken)
+    
+    %%  Clock Recovery & Downsampling
     n = floor(lng_t/M);
     l = 4;                                  % half length of pulse shape
     tnow=l*M+1; tau=0; rs=zeros(1,n);       % initialize variables
@@ -110,6 +111,7 @@ function [decoded_msg y] = Rx(r,rolloff,desired_user)
       tau=tau+mu*dx*rs(i);                              % alg update (energy)
       tnow=tnow+M; tausave(i)=tau;                      % save for plotting
     end
+    num_frames = floor(length(rs)/frame_lng);           % calc. num frames in transmisson
 
     if DEBUG == 1
         figure (6);
@@ -120,22 +122,20 @@ function [decoded_msg y] = Rx(r,rolloff,desired_user)
     else
     end
     
-    %%  Equilization             need to finish (alg. broken 
+    %%  Equilization
     s_train = letters2pam2(preamble);   % known encoded marker sequence
     n=15;
     f = zeros(n,1);                     % initialize equalizers at 0
-    mu1=.0025;  mu2 = 0.00025;            % stepsize 
+    mu1=.0025;  mu2 = 0.0005;           % stepsize 
     delta=4;                            % delay delta
     
     find_mrkr = xcorr(s_train,rs);      % locate preamble
-    [pks, strt_data] = findpeaks(find_mrkr,'MinPeakHeight', 400,'MinPeakDistance',2000);
-    if isempty(strt_data)               % inversion check
-        find_mrkr = -find_mrkr;
-        [pks, strt_data] = findpeaks(find_mrkr,'MinPeakHeight', 400,'MinPeakDistance',2000);
+    if max(find_mrkr) < min(find_mrkr)
+       find_mrkr = -find_mrkr;          % inversion check
     end
+    [pks, strt_data] = maxk(find_mrkr,num_frames);
     strt_data = length(rs)-strt_data+1;          % place where header starts
     strt_data = sort(strt_data);
-    
     if DEBUG == 1
         figure(7);
         plot(find_mrkr);
@@ -146,28 +146,38 @@ function [decoded_msg y] = Rx(r,rolloff,desired_user)
     k = 1;
     err = zeros(1,length(rs));              % error tracking term
     pre_eq = zeros(1,pre_lng);
-    
+    carry_pre = zeros(1,n);
+    carry_user = zeros(1,n);
+
     % start of equilization, frame by frame
-    for cnt = 1:11
+    for cnt = 1:num_frames
         strt = strt_data(1,cnt);            % copy starting index of data
         j = n+1;                            % reset for eq. alg.
         
         % LMS
-        for i=strt+n+1:strt+pre_lng-1         % iterate through preamble
+        for i=strt+n+1:strt+pre_lng-1       % iterate through preamble
           rr=rs(i:-1:i-n+1)';               % vector of received signal
           e=s_train(j-delta)-rr'*f;         % calculate error
           err(k) = e;                       % save e for error checking 
           f=f+mu1*e*rr;                     % update equalizer coefficients
           j = j+1;
           k = k+1;
-%          pre_eq(j)=rr'*f;
         end
-        pre_eq = filter(f,1,rs(strt:strt+pre_lng));   % equalize nth frame preamble
-        r_eq = horzcat(r_eq,pre_eq);        % combine equalized preambles
+        pre_eq = conv(f,rs(strt:strt+pre_lng-1));
+        if i == 1
+            carry_pre = pre_eq(pre_lng:end);
+        elseif i <= 10 && i > 1
+            pre_eq = pre_eq + [carry_pre zeros(1,length(pre_eq)-n)];
+            carry_pre = pre_eq(pre_lng:end);
+        else 
+            
+        end
+        %pre_eq_tst = filter(f,1,rs(strt:strt+pre_lng-1));   % equalize nth frame preamble
+        r_eq = horzcat(r_eq,pre_eq(1:pre_lng));        % combine equalized preambles
         
         % DD-LMS
         strt = strt + pre_lng;              % set index to start of data
-        for i=strt+n+1:strt+3*data_lng-1      % iterate through user 1,2 and 3
+        for i=strt+n+1:strt+3*data_lng-1    % iterate through user 1,2 and 3
           rr=rs(i:-1:i-n+1)';               % vector of received signal
           user_train = quantalph(rr'*f,[-3 -1 1 3]);   % quantize given index for error calc
           e=user_train-rr'*f;               % calculate error
@@ -175,8 +185,17 @@ function [decoded_msg y] = Rx(r,rolloff,desired_user)
           f=f+mu2*e*rr;                     % update equalizer coefficients
           k = k+1;                          % index error term
         end
-        user_eq = conv(f,rs(strt:strt+3*data_lng));   % equalize nth frame preamble
-        r_eq = horzcat(r_eq,user_eq);               % combine to equalization vector
+        user_eq = conv(f,rs(strt:strt+3*data_lng-1));
+        if i == 1
+            user_pre = user_eq(data_lng:end);
+        elseif i <= 10 && i > 1
+            user_eq = user_eq + [user_pre zeros(1,length(3*data_lng)-n)];
+            user_pre = user_eq(data_lng:end);
+        else 
+            
+        end
+       %user_eq_tst = filter(f,1,rs(strt:strt+3*data_lng-1));   % equalize nth frame preamble
+       r_eq = horzcat(r_eq,user_eq(1:3*data_lng));               % combine to equalization vector
     end
     
     if DEBUG == 1
@@ -193,8 +212,7 @@ function [decoded_msg y] = Rx(r,rolloff,desired_user)
        plot(find_mrkr);
        title('Correlation of EQ data and Preamble');
     end
-
-    %y = zeros(1,frame_lng);                    % initialize vector   
+   
     y = quantalph(r_eq(2:end),[-3 -1 1 3]);    % quantize vector
     y = y';
     
@@ -210,19 +228,16 @@ function [decoded_msg y] = Rx(r,rolloff,desired_user)
         title('Correlation of Preamble and Quantized sig');
     end
     
-    [pks, strt_data] = findpeaks(find_mrkr,'MinPeakHeight', 400,'MinPeakDistance',2000);
-    if isempty(strt_data)               % inversion check
-        find_mrkr = -find_mrkr;
-        [pks, strt_data] = findpeaks(find_mrkr,'MinPeakHeight', 400,'MinPeakDistance',2000);
-    end
-    strt_data = length(y)-strt_data+1;          % place where header starts
-    strt_data = sort(strt_data);
-    %[pks,strt_data] = max(abs(find_mrkr));
-    %strt_data = length(y)-strt_data+1;         % place where header starts
-    num_frames = floor(length(y/frame_lng));    % tot numb of frames in signal
+%     if max(find_mrkr) < min(find_mrkr)
+%        find_mrkr = -find_mrkr;          % inversion check
+%     end
+%     [pks, strt_data] = maxk(find_mrkr,num_frames);
+%     strt_data = length(y)-strt_data+1;          % place where header starts
+%     strt_data = sort(strt_data);
+      strt_data=strt_data+1;
     
-    for i = 1:11                  % index through frame by frame (broken on last iteration)
-        strt = strt_data(1,i) + pre_lng+1;% set to start of U1 data for frame
+    for i = 1:num_frames-1                  % index through frame by frame (broken on last iteration)
+        strt = strt_data(1,i) + pre_lng;% set to start of U1 data for frame
         user1 =  pam2letters2(y(strt:strt+data_lng-1));
         strt = strt+data_lng;             % set to start of U2 data for frame
         user2 =  pam2letters2(y(strt:strt+data_lng-1));
@@ -233,19 +248,6 @@ function [decoded_msg y] = Rx(r,rolloff,desired_user)
         user2_msg = horzcat(user2_msg,user2);
         user3_msg = horzcat(user3_msg,user3);
     end
-%     for i = 1:length(strt_data)                        % index through frame by frame (broken on last iteration)
-%         
-%         user1 =  pam2letters2(y(strt:strt+data_lng-1));
-%         strt = strt+data_lng;           % set to start of U2 data for frame
-%         user2 =  pam2letters2(y(strt:strt+data_lng-1));
-%         strt = strt+data_lng;           % set to start of U3 data for frame
-%         user3 =  pam2letters2(y(strt:strt+data_lng-1));
-%         strt = strt+data_lng + pre_lng+delta-1;
-%         
-%         user1_msg = horzcat(user1_msg,user1);
-%         user2_msg = horzcat(user2_msg,user2);
-%         user3_msg = horzcat(user3_msg,user3);
-%     end
     
     if user == 1
         disp(user1_msg);
