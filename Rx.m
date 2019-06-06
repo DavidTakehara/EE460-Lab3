@@ -2,15 +2,14 @@
 %   David Takehara
 %   5/20/19
 %   EE 460 - Lab 6
-%   Digital Receiver Project
+%   Digital Receiver Project (work on indexing for decoding)
 %
-%   Patch Notes: Tau broken, adjust mu and delta to make est. linear
 %
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 function [decoded_msg y] = Rx(r,rolloff,desired_user)
     beta = rolloff;                             %   beta
     user = desired_user;                        %   user to decode
-    DEBUG = 1;                                  %   debug (Y == 1, N == 0)
+    DEBUG = 0;                                  %   debug (Y == 1, N == 0)
     f_if = 2000000;                             %   intermediate mod. frequency
     Fs = 850000;                                %   sampling frequency
     Ts = 1/Fs;                                  %   sampling period
@@ -19,7 +18,7 @@ function [decoded_msg y] = Rx(r,rolloff,desired_user)
     pre_lng = 245;                              %   length of preabmle
     data_lng = 875;                             %   length of data
     frame_lng = 2870;                           %   length of whole frame
-    
+
     %%  Frequency and Phase Tracking
     %   PLL Preprocess (squaring Rx signal)
     q=r.^2;                           % square nonlinearity  
@@ -27,9 +26,7 @@ function [decoded_msg y] = Rx(r,rolloff,desired_user)
     fa=[0 0 1 1 0 0];                 % which is twice f_0
     b=firpm(fl,ff,fa);                % BPF tor freq recovery
     rp=filter(b,1,q);                 % filter gives preprocessed r
-    figure (13);
-    freqz(b,1);
-    
+
     if DEBUG == 1
         figure (1);
         plotspec(rp,Ts);
@@ -45,15 +42,15 @@ function [decoded_msg y] = Rx(r,rolloff,desired_user)
     [IR,f]=freqz(b,1,length(rp),1/Ts);   % freq response of filter (change back to h if IIR doesnt work)
     [mi,im]=min(abs(f-freqS));           % freq where peak occurs
     bpfPhase=angle(IR(im));              % < of BPF at peak freq
-    
+
     time=length(r)/Fs; t=0:Ts:time-Ts;   % time vector
     mu1 = 0.005; mu2 = .00005;            % algorithm stepsizes
 
     f0 = f_if - 2*Fs;                    % assumed freq at receiver(aliased to 300k)
-   
+
     lng_t=length(t); th1=zeros(1,lng_t);    % initialize estimates
     th2=zeros(1,lng_t); carest=zeros(1,lng_t);
-    
+
     for k=1:lng_t-1                          % Dual PLL Here
       th1(k+1)=th1(k)-mu1*rp(k)*sin(4*pi*f0*t(k)+2*th1(k)+bpfPhase);           
       th2(k+1)=th2(k)-mu2*rp(k)*sin(4*pi*f0*t(k)+2*th1(k)+2*th2(k)+bpfPhase);  
@@ -69,10 +66,10 @@ function [decoded_msg y] = Rx(r,rolloff,desired_user)
         ylabel('\theta_2');
     else
     end
-    
+
     %%  Demod w/ Recovered Carrier
     r_demod = r .* carest';                 %   demodulate from IF (column)
-    
+
     if DEBUG == 1
         figure (3);                         %   plot Rx signal
         plotspec(r,Ts);
@@ -82,7 +79,7 @@ function [decoded_msg y] = Rx(r,rolloff,desired_user)
         title('Plotspec of demod recieved signal');
     else
     end
-    
+
     %%  Matched Filtering
     M = T_sym/Ts;                    % downsample factor
     ps = srrc(4,beta,M,0);
@@ -93,9 +90,8 @@ function [decoded_msg y] = Rx(r,rolloff,desired_user)
         title('Plotspec of matched filter output');
     else
     end
-    
-    
-    %%  Clock Recovery & Downsampling
+
+    %%  Clock Recovery & Downsampling (fix delt and mu values, es broken)
     n = floor(lng_t/M);
     l = 4;                                  % half length of pulse shape
     tnow=l*M+1; tau=0; rs=zeros(1,n);       % initialize variables
@@ -111,7 +107,6 @@ function [decoded_msg y] = Rx(r,rolloff,desired_user)
       tau=tau+mu*dx*rs(i);                              % alg update (energy)
       tnow=tnow+M; tausave(i)=tau;                      % save for plotting
     end
-    num_frames = floor(length(rs)/frame_lng);           % calc. num frames in transmisson
 
     if DEBUG == 1
         figure (6);
@@ -121,21 +116,26 @@ function [decoded_msg y] = Rx(r,rolloff,desired_user)
         subplot(2,1,2), plot(tausave(1:i-2))    % plot trajectory of tau
     else
     end
-    
-    %%  Equilization
+
+    %%  Equilization             need to finish (alg. broken 
     s_train = letters2pam2(preamble);   % known encoded marker sequence
-    n=15;
+    n=10;
     f = zeros(n,1);                     % initialize equalizers at 0
-    mu1=.0025;  mu2 = 0.0005;           % stepsize 
+    mu1=.01;  mu2 = 0.0025;          % stepsize 
     delta=4;                            % delay delta
-    
+
     find_mrkr = xcorr(s_train,rs);      % locate preamble
-    if max(find_mrkr) < min(find_mrkr)
-       find_mrkr = -find_mrkr;          % inversion check
+    [~,strt_data] = max(abs(find_mrkr));      % locate preamble
+    strt_data=mod(strt_data,frame_lng):frame_lng:length(rs)-frame_lng;
+    if strt_data(1)<200
+        strt_data=strt_data(2:end);
     end
-    [pks, strt_data] = maxk(find_mrkr,num_frames);
-    strt_data = length(rs)-strt_data+1;          % place where header starts
-    strt_data = sort(strt_data);
+        
+    if min(find_mrkr) > max(find_mrkr)               % inversion check
+        find_mrkr = -find_mrkr;
+        rs = -rs;
+    end
+
     if DEBUG == 1
         figure(7);
         plot(find_mrkr);
@@ -146,65 +146,43 @@ function [decoded_msg y] = Rx(r,rolloff,desired_user)
     k = 1;
     err = zeros(1,length(rs));              % error tracking term
     pre_eq = zeros(1,pre_lng);
-    carry_pre = zeros(1,n);
-    carry_user = zeros(1,n);
 
     % start of equilization, frame by frame
-    for cnt = 1:num_frames
+    for cnt = 1:length(strt_data)
         strt = strt_data(1,cnt);            % copy starting index of data
-        j = n+1;                            % reset for eq. alg.
-        
+        j = 1;                            % reset for eq. alg.
+
         % LMS
-        for i=strt+n+1:strt+pre_lng-1       % iterate through preamble
-          rr=rs(i:-1:i-n+1)';               % vector of received signal
-          e=s_train(j-delta)-rr'*f;         % calculate error
+        for i=strt:strt+pre_lng-1         % iterate through preamble
+          rr=rs(i+delta:-1:i-n+1+delta)'; % vector of received signal
+          e=s_train(j)-rr'*f;             % calculate error
           err(k) = e;                       % save e for error checking 
           f=f+mu1*e*rr;                     % update equalizer coefficients
-          j = j+1;
           k = k+1;
+          pre_eq(j)=rr'*f;
+          j = j+1;
         end
-        pre_eq = conv(f,rs(strt:strt+pre_lng-1));
-        if i == 1
-            carry_pre = pre_eq(pre_lng:end);
-        elseif i <= 10 && i > 1
-            pre_eq = pre_eq + [carry_pre zeros(1,length(pre_eq)-n)];
-            carry_pre = pre_eq(pre_lng:end);
-        else 
-            
-        end
-        %pre_eq_tst = filter(f,1,rs(strt:strt+pre_lng-1));   % equalize nth frame preamble
-        r_eq = horzcat(r_eq,pre_eq(1:pre_lng));        % combine equalized preambles
-        
+        r_eq = horzcat(r_eq,pre_eq);        % combine equalized preambles
+
         % DD-LMS
-        strt = strt + pre_lng;              % set index to start of data
-        for i=strt+n+1:strt+3*data_lng-1    % iterate through user 1,2 and 3
+        for i=strt+pre_lng:strt+pre_lng+3*data_lng-1      % iterate through user 1,2 and 3
           rr=rs(i:-1:i-n+1)';               % vector of received signal
-          user_train = quantalph(rr'*f,[-3 -1 1 3]);   % quantize given index for error calc
-          e=user_train-rr'*f;               % calculate error
+          user_eq(i) = quantalph(rr'*f,[-3 -1 1 3]);   % quantize given index for error calc
+          e=user_eq(i)-rr'*f;               % calculate error
           err(k) = e;                       % save e for error checking
           f=f+mu2*e*rr;                     % update equalizer coefficients
           k = k+1;                          % index error term
         end
-        user_eq = conv(f,rs(strt:strt+3*data_lng-1));
-        if i == 1
-            user_pre = user_eq(data_lng:end);
-        elseif i <= 10 && i > 1
-            user_eq = user_eq + [user_pre zeros(1,length(3*data_lng)-n)];
-            user_pre = user_eq(data_lng:end);
-        else 
-            
-        end
-       %user_eq_tst = filter(f,1,rs(strt:strt+3*data_lng-1));   % equalize nth frame preamble
-       r_eq = horzcat(r_eq,user_eq(1:3*data_lng));               % combine to equalization vector
+        r_eq = horzcat(r_eq,user_eq(strt+pre_lng:strt+pre_lng+3*data_lng-1));               % combine to equalization vector
     end
-    
+
     if DEBUG == 1
         figure(8);
         subplot(2,1,1), plot(r_eq(2:end),'b.')      % plot constellation diagram of rs
         title('constellation diagram (equilization)');
         subplot(2,1,2), plot(err(2:end))            % plot trajectory of error
     end
-   
+
     %% Quantization (implement frame by frame quantizing and preamlbe locating)    
     find_mrkr = xcorr(s_train,r_eq);           % locate preamble
     if DEBUG == 1
@@ -212,15 +190,15 @@ function [decoded_msg y] = Rx(r,rolloff,desired_user)
        plot(find_mrkr);
        title('Correlation of EQ data and Preamble');
     end
-   
+ 
     y = quantalph(r_eq(2:end),[-3 -1 1 3]);    % quantize vector
     y = y';
-    
+
     %% Decodeing
     user1_msg = 0;
     user2_msg = 0;
     user3_msg = 0;
-    
+
     find_mrkr = xcorr(s_train,y);       % locate preamble
     if DEBUG == 1
         figure (11);
@@ -228,40 +206,40 @@ function [decoded_msg y] = Rx(r,rolloff,desired_user)
         title('Correlation of Preamble and Quantized sig');
     end
     
-%     if max(find_mrkr) < min(find_mrkr)
-%        find_mrkr = -find_mrkr;          % inversion check
-%     end
-%     [pks, strt_data] = maxk(find_mrkr,num_frames);
-%     strt_data = length(y)-strt_data+1;          % place where header starts
-%     strt_data = sort(strt_data);
-      strt_data=strt_data+1;
-    
-    for i = 1:num_frames-1                  % index through frame by frame (broken on last iteration)
-        strt = strt_data(1,i) + pre_lng;% set to start of U1 data for frame
+    find_mrkr = xcorr(s_train,rs);            % correlate
+    if min(find_mrkr) > max(find_mrkr)        % inversion check
+        find_mrkr = -find_mrkr;
+        y = -y;
+    end
+    [~,strt_data] = max(abs(find_mrkr));      % locate preamble
+    strt_data=mod(strt_data,frame_lng):frame_lng:length(y)-frame_lng;
+    strt = strt_data(1,1) + pre_lng;          % set to start of U1 data for frame
+       
+    for i = 1:length(strt_data)                  % index through frame by frame (broken on last iteration)
         user1 =  pam2letters2(y(strt:strt+data_lng-1));
         strt = strt+data_lng;             % set to start of U2 data for frame
         user2 =  pam2letters2(y(strt:strt+data_lng-1));
         strt = strt+data_lng;             % set to start of U3 data for frame
         user3 =  pam2letters2(y(strt:strt+data_lng-1));
-        
+        strt = strt+data_lng+pre_lng;     % point at next U1 data frame
+
         user1_msg = horzcat(user1_msg,user1);
         user2_msg = horzcat(user2_msg,user2);
         user3_msg = horzcat(user3_msg,user3);
     end
-    
+
     if user == 1
         disp(user1_msg);
-        decoded_msg = user1_msg(2:end);
-        
+        decoded_msg=user1_msg(2:end);
+
     elseif user == 2
         disp(user2_msg);
-        decoded_msg = user2_msg(2:end);
-        
+        decoded_msg=user2_msg(2:end);
+
     elseif user == 3
         disp(user3_msg);
-        decoded_msg = user3_msg(2:end);
-        
-    end
-    
-end
+        decoded_msg=user3_msg(2:end);
 
+    end
+
+end
